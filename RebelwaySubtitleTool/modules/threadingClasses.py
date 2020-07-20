@@ -1,7 +1,9 @@
-import logging, boto3, requests, threading, safeqthreads, queue, os, time
+import logging, boto3, requests, threading, safeqthreads, queue, os, time, multiprocessing
 from PyQt5.QtCore import QThread, pyqtSignal, QDir, QObject, QMutex
 from botocore.exceptions import ClientError, ParamValidationError
 import modules.awsModules as awsModules
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed #ProcessPoolExecutor
+import asyncio
 
 
 ##################################################################################################
@@ -245,22 +247,13 @@ class Progress():
 			self.upperParent.fileProgress.emit(percentage)
 
 
-
-
-
-
-
-
-
-
 class TranscribeAndDownload(QThread):
 
 	currentStatus = pyqtSignal(str)
 	fileFinished = pyqtSignal(str)
 
-	def __init__(self, files, bucket, region, outputFolder):
+	def __init__(self, files, region, outputFolder):
 		QThread.__init__(self)
-		self.bucket = bucket
 		self.region = region
 		self.files = files
 		self.outputFolder = outputFolder
@@ -271,19 +264,20 @@ class TranscribeAndDownload(QThread):
 
 		QueueList = queue.Queue()
 		for file in self.files:
-			thread = threading.Thread(target=TranscribeThread, args=(self, self.region,  self.bucket, file, self.outputFolder , QueueList))
+			thread = threading.Thread(target=TranscribeThread, args=(self, self.region, file["bucket"], file["name"], self.outputFolder , QueueList))
 			threads.append(thread)
 
 		for thread in threads:
 			thread.start()
 			res, returnFile = QueueList.get()
+			
 			if res == True:
 				self.fileFinished.emit(returnFile)
 
 		for thread in threads:
 			thread.join()
 
-class TranscribeThread():
+class TranscribeThread(threading.Thread):
 	def __init__(self, parent, inRegion, inBucket, inMediaFile, outputFolder, inQueue):
 		try:
 			transciptionJob = awsModules.Transcribe(inRegion, inBucket, inMediaFile)
@@ -302,9 +296,76 @@ class TranscribeThread():
 
 			transcript = transciptionJob.getTranscript( str(response["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]) )
 			awsModules.SRTModule(transcript, "en", os.path.abspath(os.path.join(outputFolder, f"{inMediaFile[:-4]}-en.srt")))
-			inQueue.put(True, inMediaFile)
+			inQueue.put((True, inMediaFile))
 		except:
-			inQueue.put(False, "")
+			inQueue.put((False, ""))
+
+
+
+
+
+
+
+
+
+
+class TranscribeAndDownload222(QThread):
+
+	currentStatus = pyqtSignal(str)
+	fileFinished = pyqtSignal(str)
+
+	def __init__(self, files, region, outputFolder):
+		QThread.__init__(self)
+		self.region = region
+		self.files = files
+		self.outputFolder = outputFolder
+
+	def run(self):
+
+		#This must be run async, otherwise we'd submit a job and then wait until it finishes before we start another - VERY SLOW!
+		#This speeds it up, by submitting multiple jobs at the same time, and awaiting the return.
+		try:
+			loop = asyncio.get_event_loop()
+		except:
+			loop = asyncio.new_event_loop()
+			asyncio.set_event_loop(loop)
+
+		tasks = []
+		for file in self.files:
+			threading.Thread(target=TranscribeThread, args=(self.region, file["bucket"], file["name"], self.outputFolder, ))
+
+			task = asyncio.ensure_future(self.waiting(ii))
+			task = self.add_success_callback(task, self.my_Callback)
+			tasks.append(task)
+
+		finished, unfinished = loop.run_until_complete(asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED))
+		loop.close()
+
+	async def waiting(self, time):
+		await asyncio.sleep(time)
+		return f"Time {time}"
+
+
+	async def add_success_callback(self, fut, callback):
+		result = await fut
+		await callback(result)
+		return result
+
+	async def my_Callback(self, message):
+		print(message)
+
+
+class TranscribeThread222():
+	def __init__(self, parent, inRegion, inBucket, inMediaFile, outputFolder, inQueue):
+		self.inMediaFile = inMediaFile
+
+	async def awation():
+		print("Await_1")
+		await asyncio.sleep(1.5)
+		print("Await_2")
+		return (True, self.inMediaFile)
+
+
 
 
 #print( "\nJob Complete")
