@@ -20,7 +20,6 @@ class Transcribe:
 	def createJob(self):
 		transcribe = boto3.client("transcribe", region_name=self.region)
 		mediaUri = f"https://s3-{self.region}.amazonaws.com/{self.bucket}/{self.mediaFile}"
-		print(f"Creating Job: Transcribe {self.mediaFile} for {mediaUri}")
 
 		response = transcribe.start_transcription_job( TranscriptionJobName="transcribe_" + uuid.uuid4().hex + "_" + self.mediaFile , \
 			LanguageCode = "en-US", \
@@ -81,8 +80,6 @@ class SRTModule:
 		nPhrase = True
 		x = 0
 		c = 0
-
-		print("==> Creating phrases from transcript...")
 
 		for item in items:
 

@@ -1,9 +1,14 @@
-import logging, boto3, requests, threading, safeqthreads, queue, os, time, multiprocessing
-from PyQt5.QtCore import QThread, pyqtSignal, QDir, QObject, QMutex
+import logging, boto3, requests, threading, safeqthreads, queue, os, time, multiprocessing, random
+from PyQt5.QtCore import QThread, pyqtSignal, QDir, QObject, QMutex, Qt
+from PyQt5.QtWidgets import QTreeWidgetItem
+
 from botocore.exceptions import ClientError, ParamValidationError
 import modules.awsModules as awsModules
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed #ProcessPoolExecutor
 import asyncio
+
+from hurry.filesize import size
+from collections import namedtuple
 
 
 ##################################################################################################
@@ -79,6 +84,9 @@ class CheckBucket(QThread):
 		self.BucketCheckedResponse.emit(self.returning)
 		self.mutex.unlock()
 
+##################################################################################################
+## CheckBuckets actual Thread.
+##################################################################################################
 class CheckBucketThread():
 	def __init__(self, bucket, inQueue):
 		inQueue = inQueue
@@ -150,7 +158,54 @@ class DeleteBucketsThread(QThread):
 			self.BucketDeletedResponse.emit(True, f"Bucket {self.bucket_name} Deleted Successfully!\n")
 
 
+##################################################################################################
+## Loads up the Client Buckets and their files, and outputs them as a QTreeWidgetItem.
+## This helps us to set checkboxes, progress bars, buttons, etc to each specific item and type
+##################################################################################################
+class ClientBuckets(QThread):
+	allBucketItems =  pyqtSignal(object)
+	def __init__(self):
+		QThread.__init__(self)
+		self.S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
 
+	def run(self):
+		botoClient = boto3.client('s3')
+		botoResource = boto3.resource('s3')
+		response = botoClient.list_buckets()
+
+		topItems = []
+		topItems.clear()
+		for bucket in response['Buckets']:
+			parentBucket = QTreeWidgetItem([bucket["Name"]])
+			parentBucket.setFlags(parentBucket.flags() | Qt.ItemIsTristate | Qt.ItemIsUserCheckable)
+
+			child, childSize = self.CheckItems(botoClient.list_objects_v2(Bucket=bucket["Name"])['Contents'], bucket["Name"])
+			
+			parentBucket.addChildren(child)
+			parentBucket.setText(3, childSize)
+			topItems.append(parentBucket)
+			
+		self.allBucketItems.emit(topItems)
+
+	def CheckItems(self, currentBucket, bucket):
+		currentItems = []
+		# ETag, Key, LastModified, Size, StorageClass
+		completeFileSize = 0
+		for item in currentBucket:
+			if item["Key"].endswith("/") == False:
+				completeFileSize += item["Size"]
+				fileSize = size(item["Size"])
+				child = QTreeWidgetItem([ item["Key"] , "Unknown", item["ETag"], f'{fileSize}'])
+				child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+				child.setCheckState(0, Qt.Unchecked)
+				currentItems.append(child)
+		return currentItems, size(completeFileSize)
+
+
+
+##################################################################################################
+## Depricated, and will be removed when ready
+##################################################################################################
 class GetContentsThread(QThread):
 
 	ContentReponse = pyqtSignal(list)
@@ -169,6 +224,11 @@ class GetContentsThread(QThread):
 			key = ["None"]
 			self.ContentReponse.emit(key)
 
+
+##################################################################################################
+## Not currently implemented in the current build. This takes files, and starts to upload them
+## synchoronously (one at a time, so internet traffic is not overloaded).
+##################################################################################################
 class UploadFiles(QThread):
 	fileCompleted = pyqtSignal(int)
 	fileProgress = pyqtSignal(int)
@@ -204,8 +264,9 @@ class UploadFiles(QThread):
 		for thread in threads:
 			thread.join()
 
-
-
+##################################################################################################
+## The actual worker thread to upload the files.
+##################################################################################################
 class UploadFile():
 	def __init__(self, parent, file_name, bucket, region, object_name, inQueue):
 		self.objectName = object_name
@@ -224,7 +285,11 @@ class UploadFile():
 		else:
 			self.queue.put(os.path.getsize(self.fileName))
 
-
+##################################################################################################
+## The progress amount for the upload sequence. It fires off a progress amount to the status bar
+## This will need to be changed to add the progress amount to the listbox instead, and have a
+## overall progress on the status bar.
+##################################################################################################
 class Progress():
 
 	def __init__(self, filename, parent, upperParent):
@@ -246,73 +311,22 @@ class Progress():
 			self.upperParent.fileCompleted.emit(overallPercent)
 			self.upperParent.fileProgress.emit(percentage)
 
-
+##################################################################################################
+## The main workhorse. This takes a list of items from the checklist, and sends them to a
+## Async thread (so no more waiting one at a time. Also, now, there is no memory leakage or 
+## extra strain on the CPU by making multiple processes. This uses the Asyncio library, which
+## fires off the loops properly, and no cross threading or things happen.
+##
+## This needs to have a second emitter added (replace the fileFinished), currentStatus is not used
+## Also need to lock up the main threads "Transcribe", "Listview" and "Refresh" buttons, so that
+## nothing is overwritten or submitted twice!!
+##################################################################################################
 class TranscribeAndDownload(QThread):
 
 	currentStatus = pyqtSignal(str)
 	fileFinished = pyqtSignal(str)
+	itemToEmit = pyqtSignal(object, int, str) #TODO - Create a second finishing emitter!!
 
-	def __init__(self, files, region, outputFolder):
-		QThread.__init__(self)
-		self.region = region
-		self.files = files
-		self.outputFolder = outputFolder
-
-	def run(self):
-		threads = []
-		totalFiles = 0
-
-		QueueList = queue.Queue()
-		for file in self.files:
-			thread = threading.Thread(target=TranscribeThread, args=(self, self.region, file["bucket"], file["name"], self.outputFolder , QueueList))
-			threads.append(thread)
-
-		for thread in threads:
-			thread.start()
-			res, returnFile = QueueList.get()
-			
-			if res == True:
-				self.fileFinished.emit(returnFile)
-
-		for thread in threads:
-			thread.join()
-
-class TranscribeThread(threading.Thread):
-	def __init__(self, parent, inRegion, inBucket, inMediaFile, outputFolder, inQueue):
-		try:
-			transciptionJob = awsModules.Transcribe(inRegion, inBucket, inMediaFile)
-			response = transciptionJob.createJob()
-
-			parent.currentStatus.emit(f"Transcription Job: {response['TranscriptionJob']['TranscriptionJobName']} - In Progress")
-			currentIt = 0
-			dotStr = "."
-			while( response["TranscriptionJob"]["TranscriptionJobStatus"] == "IN_PROGRESS"):
-				time.sleep(10)
-				response = transciptionJob.getJobStatus( response["TranscriptionJob"]["TranscriptionJobName"] )
-				parent.currentStatus.emit(f"Transcription Job: {response['TranscriptionJob']['TranscriptionJobName']} - In Progress{dotStr[:1]*currentIt}")
-				currentIt += 1
-
-			parent.currentStatus.emit(f"Transcription Job: {response['TranscriptionJob']['TranscriptionJobName']} - Job Complete - Start Time: {str(response['TranscriptionJob']['CreationTime'])} - End Time: {str(response['TranscriptionJob']['CompletionTime'])}")
-
-			transcript = transciptionJob.getTranscript( str(response["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]) )
-			awsModules.SRTModule(transcript, "en", os.path.abspath(os.path.join(outputFolder, f"{inMediaFile[:-4]}-en.srt")))
-			inQueue.put((True, inMediaFile))
-		except:
-			inQueue.put((False, ""))
-
-
-
-
-
-
-
-
-
-
-class TranscribeAndDownload222(QThread):
-
-	currentStatus = pyqtSignal(str)
-	fileFinished = pyqtSignal(str)
 
 	def __init__(self, files, region, outputFolder):
 		QThread.__init__(self)
@@ -332,50 +346,52 @@ class TranscribeAndDownload222(QThread):
 
 		tasks = []
 		for file in self.files:
-			threading.Thread(target=TranscribeThread, args=(self.region, file["bucket"], file["name"], self.outputFolder, ))
-
-			task = asyncio.ensure_future(self.waiting(ii))
-			task = self.add_success_callback(task, self.my_Callback)
+			task = asyncio.ensure_future(self.transcribeJobCreator(self.region, file["bucket"], file["name"], self.outputFolder, file["item"]))
+			task = self.add_success_callback(task, self.transcribeJobCallback)
 			tasks.append(task)
 
 		finished, unfinished = loop.run_until_complete(asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED))
 		loop.close()
 
-	async def waiting(self, time):
-		await asyncio.sleep(time)
-		return f"Time {time}"
-
-
+	
+	## This creates a callback loop. Otherwise, the function won't register as finished with the "run_until_complete" loop.
 	async def add_success_callback(self, fut, callback):
 		result = await fut
 		await callback(result)
 		return result
 
-	async def my_Callback(self, message):
-		print(message)
+
+	async def transcribeJobCallback(self, result):
+		res = result["Result"]
+		item = result["Item"]
+		fileOutput = result["FileOutput"]
+		message = result["Message"]
+
+		#TODO - Make a different emitter!!!
+		#self.itemToEmit.emit(item, 1,  message, res)
 
 
-class TranscribeThread222():
-	def __init__(self, parent, inRegion, inBucket, inMediaFile, outputFolder, inQueue):
-		self.inMediaFile = inMediaFile
+	async def transcribeJobCreator(self, inRegion, inBucket, inMediaFile, outputFolder, item):
+		try:
+			transciptionJob = awsModules.Transcribe(inRegion, inBucket, inMediaFile)
+			response = transciptionJob.createJob() #TODO - Make a proper job name!!
 
-	async def awation():
-		print("Await_1")
-		await asyncio.sleep(1.5)
-		print("Await_2")
-		return (True, self.inMediaFile)
+			self.itemToEmit.emit(item, 1,  f"Working: {response['TranscriptionJob']['TranscriptionJobName']}")
+			
+			currentIt = 0
+			dotStr = "." #program does not like me adding a . inside of where it is used, so I use this.
+			while( response["TranscriptionJob"]["TranscriptionJobStatus"] == "IN_PROGRESS"):
+				await asyncio.sleep(10)
+				response = transciptionJob.getJobStatus( response["TranscriptionJob"]["TranscriptionJobName"] )
 
+				self.itemToEmit.emit(item, 1,  f"Working: {response['TranscriptionJob']['TranscriptionJobName']} - {dotStr[:1]*currentIt}")
+				currentIt += 1
 
+			self.itemToEmit.emit(item, 1,  f"Finished: {response['TranscriptionJob']['TranscriptionJobName']}")
 
+			transcript = transciptionJob.getTranscript( str(response["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]) )
+			awsModules.SRTModule(transcript, "en", os.path.abspath(os.path.join(outputFolder, f"{inMediaFile[:-4]}-en.srt")))
 
-#print( "\nJob Complete")
-#print( "\tStart Time: " + str(response["TranscriptionJob"]["CreationTime"]) )
-#print( "\tEnd Time: "  + str(response["TranscriptionJob"]["CompletionTime"]) )
-#print( "\tTranscript URI: " + str(response["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]) )
-
-
-#transcript = transciptionJob.getTranscript( str(response["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]) ) 
-#print( "\n==> Transcript: \n" + transcript)
-
-## awsModules.SRTModule().writeTranscriptToSRT(transcript, "en", "subtitles-en.srt")
-#awsModules.SRTModule(transcript, "en", "subtitles-en.srt")
+			return { "Result" : True, "FileOutput" : inMediaFile, "Item" : item , "Message" : "Subtitle downloaded!" }
+		except:
+			return { "Result" : False, "FileOutput" : "", "Item" : item , "Message" : "Error #001" }

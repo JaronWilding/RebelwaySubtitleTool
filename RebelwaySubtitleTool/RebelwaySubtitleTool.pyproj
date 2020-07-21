@@ -22,9 +22,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="modules\awsModules.py" />
-    <Compile Include="modules\clientBuckets.py">
-      <SubType>Code</SubType>
-    </Compile>
     <Compile Include="modules\helperModules.py">
       <SubType>Code</SubType>
     </Compile>

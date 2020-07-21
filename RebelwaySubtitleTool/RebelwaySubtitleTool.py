@@ -1,5 +1,4 @@
-import sys, os, boto3, modules.clientBuckets, pprint
-from modules.clientBuckets import *
+import sys, os, boto3, pprint
 from modules.helperModules import *
 from modules.threadingClasses import *
 
@@ -61,7 +60,7 @@ class UI(QMainWindow):
 			self.wStatusBar.showMessage("Client Bucket(s) list loaded!")
 
 		
-		self.GetBucketList = clientBuckets()
+		self.GetBucketList = ClientBuckets()
 		self.GetBucketList.allBucketItems.connect(SetItems)
 		self.GetBucketList.start()
 
@@ -76,6 +75,11 @@ class UI(QMainWindow):
 
 
 	def TranscribeFiles(self):
+
+		def emitterConnection(item, row, message):
+			item.setText(row, message)
+
+
 		# Will return a QTreeWidgetItem -> So we can set some things in the item if needed, such as a progressbar!
 		selectedItems = get_selected_items(self.wBucketList)
 		transcribeItems = []
@@ -90,8 +94,9 @@ class UI(QMainWindow):
 					dictItem["item"] = item;
 					transcribeItems.append(dictItem)
 
-			self.TranscribeThread = TranscribeAndDownload222(transcribeItems, "us-east-2", "C:\\Users\\Jaron\\source\\repos\\RebelwaySubtitleTool\\RebelwaySubtitleTool\\subs")
+			self.TranscribeThread = TranscribeAndDownload(transcribeItems, "us-east-2", "C:\\Users\\Jaron\\Documents\\GitHub\\RebelwaySubtitleTool\\RebelwaySubtitleTool\\subs")
 			self.TranscribeThread.currentStatus.connect(lambda response: self.wStatusBar.showMessage(response))
+			self.TranscribeThread.itemToEmit.connect(emitterConnection)
 			self.TranscribeThread.start()
 
 
