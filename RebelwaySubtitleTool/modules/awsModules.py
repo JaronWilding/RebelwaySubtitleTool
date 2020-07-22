@@ -12,13 +12,16 @@ import json, codecs, re
 
 class Transcribe:
 
-	def __init__(self, region, bucket, mediaFile):
-		self.region = region
+	def __init__(self, accessKey, secretKey, region, bucket, mediaFile):
 		self.bucket = bucket
 		self.mediaFile = mediaFile
+		
+		self.accessKey = accessKey
+		self.secretKey = secretKey
+		self.region = region
 
 	def createJob(self):
-		transcribe = boto3.client("transcribe", region_name=self.region)
+		transcribe = boto3.client("transcribe", aws_access_key_id = self.accessKey, aws_secret_access_key = self.secretKey, region_name = self.region)
 		mediaUri = f"https://s3-{self.region}.amazonaws.com/{self.bucket}/{self.mediaFile}"
 
 		response = transcribe.start_transcription_job( TranscriptionJobName="transcribe_" + uuid.uuid4().hex + "_" + self.mediaFile , \

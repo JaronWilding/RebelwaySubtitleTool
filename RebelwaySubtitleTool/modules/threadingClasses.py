@@ -164,13 +164,17 @@ class DeleteBucketsThread(QThread):
 ##################################################################################################
 class ClientBuckets(QThread):
 	allBucketItems =  pyqtSignal(object)
-	def __init__(self):
+	def __init__(self, awsSettings):
 		QThread.__init__(self)
 		self.S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
 
+		self.accessKey = awsSettings["ACCESS_KEY"]
+		self.secretKey = awsSettings["SECRET_KEY"]
+		self.region = awsSettings["REGION"]
+
 	def run(self):
-		botoClient = boto3.client('s3')
-		botoResource = boto3.resource('s3')
+		botoClient = boto3.client('s3', aws_access_key_id = self.accessKey, aws_secret_access_key = self.secretKey, region_name = self.region)
+		botoResource = boto3.resource('s3', aws_access_key_id = self.accessKey, aws_secret_access_key = self.secretKey, region_name = self.region)
 		response = botoClient.list_buckets()
 
 		topItems = []
@@ -328,11 +332,14 @@ class TranscribeAndDownload(QThread):
 	itemToEmit = pyqtSignal(object, int, str) #TODO - Create a second finishing emitter!!
 
 
-	def __init__(self, files, region, outputFolder):
+	def __init__(self, files, awsSettings, outputFolder):
 		QThread.__init__(self)
-		self.region = region
 		self.files = files
 		self.outputFolder = outputFolder
+
+		self.accessKey = awsSettings["ACCESS_KEY"]
+		self.secretKey = awsSettings["SECRET_KEY"]
+		self.region = awsSettings["REGION"]
 
 	def run(self):
 
@@ -346,7 +353,7 @@ class TranscribeAndDownload(QThread):
 
 		tasks = []
 		for file in self.files:
-			task = asyncio.ensure_future(self.transcribeJobCreator(self.region, file["bucket"], file["name"], self.outputFolder, file["item"]))
+			task = asyncio.ensure_future(self.transcribeJobCreator(file["bucket"], file["name"], self.outputFolder, file["item"]))
 			task = self.add_success_callback(task, self.transcribeJobCallback)
 			tasks.append(task)
 
@@ -371,9 +378,9 @@ class TranscribeAndDownload(QThread):
 		#self.itemToEmit.emit(item, 1,  message, res)
 
 
-	async def transcribeJobCreator(self, inRegion, inBucket, inMediaFile, outputFolder, item):
+	async def transcribeJobCreator(self, inBucket, inMediaFile, outputFolder, item):
 		try:
-			transciptionJob = awsModules.Transcribe(inRegion, inBucket, inMediaFile)
+			transciptionJob = awsModules.Transcribe(self.accessKey, self.secretKey, self.region, inBucket, inMediaFile)
 			response = transciptionJob.createJob() #TODO - Make a proper job name!!
 
 			self.itemToEmit.emit(item, 1,  f"Working: {response['TranscriptionJob']['TranscriptionJobName']}")

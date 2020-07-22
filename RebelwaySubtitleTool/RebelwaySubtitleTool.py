@@ -1,7 +1,8 @@
-import sys, os, boto3, pprint
+import sys, os, boto3, pprint, json
 from modules.helperModules import *
 from modules.threadingClasses import *
 
+from botocore.config import Config
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QStandardItemModel, QStandardItem, QColor
@@ -13,7 +14,10 @@ class UI(QMainWindow):
 		super(UI, self).__init__()
 
 		self.GetWidgets()
+		self.Settings()
 		self.SetFunctions()
+
+		
 
 		self.show()
 
@@ -24,10 +28,15 @@ class UI(QMainWindow):
 		self.setWindowIcon(QtGui.QIcon("icons/rw_logo.png"))
 		self.setWindowTitle("Rebelway Subtitle Tool")
 
+		
+
+
 		self.wBucketList = self.findChild(QTreeWidget, "bucketList")
 		self.wStatusBar = self.findChild(QStatusBar, "statusbar")
 		self.btnRefreshBucketList = self.findChild(QPushButton, "refreshBucketList")
 		self.btnTranscribe = self.findChild(QPushButton, "btnTranscribe")
+
+		
 		
 
 		#self.W_DwnProgress = self.findChild(QProgressBar, "downloadPGRS")
@@ -42,9 +51,17 @@ class UI(QMainWindow):
 
 		
 		self.RefreshClientBuckets()
+		
+		
 		#self.W_linksTxt.textChanged.connect(self.LinksChanged)
 		#self.W_DwnBtn.clicked.connect(self.DownloadFiles)
 		
+
+	def Settings(self):
+		with open('config.json') as json_file:
+			awsSettingsRead = json.load(json_file)
+			
+		self.awsSettings = awsSettingsRead["AWSSettings"]
 
 
 	def RefreshClientBuckets(self):
@@ -60,7 +77,7 @@ class UI(QMainWindow):
 			self.wStatusBar.showMessage("Client Bucket(s) list loaded!")
 
 		
-		self.GetBucketList = ClientBuckets()
+		self.GetBucketList = ClientBuckets(self.awsSettings)
 		self.GetBucketList.allBucketItems.connect(SetItems)
 		self.GetBucketList.start()
 
