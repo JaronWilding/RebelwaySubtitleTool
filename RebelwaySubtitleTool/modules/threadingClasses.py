@@ -1,8 +1,9 @@
-import logging, boto3, requests, threading, safeqthreads, queue, os, time, multiprocessing, random
+import logging, boto3, requests, threading, safeqthreads, queue, os, time, multiprocessing, random, json
 from PyQt5.QtCore import QThread, pyqtSignal, QDir, QObject, QMutex, Qt
 from PyQt5.QtWidgets import QTreeWidgetItem
 
 from botocore.exceptions import ClientError, ParamValidationError
+from modules.helperModules import *
 import modules.awsModules as awsModules
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed #ProcessPoolExecutor
 import asyncio
@@ -162,20 +163,58 @@ class DeleteBucketsThread(QThread):
 ## Loads up the Client Buckets and their files, and outputs them as a QTreeWidgetItem.
 ## This helps us to set checkboxes, progress bars, buttons, etc to each specific item and type
 ##################################################################################################
-class ClientBuckets(QThread):
+class ClientBucketFiles(QThread):
 	allBucketItems =  pyqtSignal(object)
-	def __init__(self, awsSettings):
-		QThread.__init__(self)
-		self.S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
+	currentBuckets =  pyqtSignal(object)
+	allJobItems = pyqtSignal(object)
 
-		self.accessKey = awsSettings["ACCESS_KEY"]
-		self.secretKey = awsSettings["SECRET_KEY"]
-		self.region = awsSettings["REGION"]
+	def __init__(self, inSettings):
+		QThread.__init__(self)
+		#self.S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
+
+		self.settings = inSettings
+		self.fileIcon_Standard = inSettings.fileIcon_NoChecksum
+		self.fileIcon_JobRunning = inSettings.fileIcon_JobRunning
+		self.fileIcon_JobAvailable = inSettings.fileIcon_Checksum
 
 	def run(self):
-		botoClient = boto3.client('s3', aws_access_key_id = self.accessKey, aws_secret_access_key = self.secretKey, region_name = self.region)
-		botoResource = boto3.resource('s3', aws_access_key_id = self.accessKey, aws_secret_access_key = self.secretKey, region_name = self.region)
+
+		## Create all the clients needed! We need a client to get the buckets and job list, and a resource to get all the files inside the buckets.
+		botoClient = boto3.client('s3', aws_access_key_id = self.settings.accessKey, aws_secret_access_key = self.settings.secretKey, region_name = self.settings.region)
+		botoResource = boto3.resource('s3', aws_access_key_id = self.settings.accessKey, aws_secret_access_key = self.settings.secretKey, region_name = self.settings.region)
+		botoJobClient = boto3.client('transcribe', aws_access_key_id = self.settings.accessKey, aws_secret_access_key = self.settings.secretKey, region_name = self.settings.region)
+
+		## We have the buckets, so emit immediately!
 		response = botoClient.list_buckets()
+		self.currentBuckets.emit(response['Buckets'])
+				
+		## Job status - Still need to complete fully!!
+		jobList = botoJobClient.list_transcription_jobs()
+		jobListNames = []
+
+
+		parentJobs = []
+		parentJobCompleted = QTreeWidgetItem(["Completed Jobs"])
+		parentJobCompleted.setFlags(parentJobCompleted.flags() | Qt.ItemIsTristate | Qt.ItemIsUserCheckable)
+		
+		for job in jobList["TranscriptionJobSummaries"]:
+			jobName = job["TranscriptionJobName"]
+
+			child = QTreeWidgetItem([jobName])
+			child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+			child.setCheckState(0, Qt.Unchecked)
+
+			child = SetItemData(child, JOBNAME = jobName, CREATIONTIME = job["CreationTime"], COMPLETEDTIME =  job["CompletionTime"], LANGUAGE = job["LanguageCode"])
+			
+			LogOutput(self.settings, job["CreationTime"])
+
+			parentJobCompleted.addChild(child)
+			
+			jobListNames.append(jobName)
+
+		## We need it as a list, so just add that here for now. We will have to create a proper one, as this one should be for completed jobs.
+		parentJobs.append(parentJobCompleted)
+		self.allJobItems.emit(parentJobs)
 
 		topItems = []
 		topItems.clear()
@@ -183,50 +222,68 @@ class ClientBuckets(QThread):
 			parentBucket = QTreeWidgetItem([bucket["Name"]])
 			parentBucket.setFlags(parentBucket.flags() | Qt.ItemIsTristate | Qt.ItemIsUserCheckable)
 
-			child, childSize = self.CheckItems(botoClient.list_objects_v2(Bucket=bucket["Name"])['Contents'], bucket["Name"])
+			child, childSize = self.CheckItems(botoClient.list_objects_v2(Bucket=bucket["Name"])['Contents'], bucket["Name"], jobListNames)
 			
 			parentBucket.addChildren(child)
-			parentBucket.setText(3, childSize)
+
+			parentBucket.setText(2, childSize)
+			parentBucket.setToolTip(2, f'Filesize: {childSize}')
+			parentBucket = SetItemData(parentBucket, FILESIZE = childSize, BUCKET =  bucket["Name"])
+
 			topItems.append(parentBucket)
 			
 		self.allBucketItems.emit(topItems)
+		
 
-	def CheckItems(self, currentBucket, bucket):
+	def CheckItems(self, currentBucket, bucket, jobListNames):
 		currentItems = []
 		# ETag, Key, LastModified, Size, StorageClass
 		completeFileSize = 0
 		for item in currentBucket:
 			if item["Key"].endswith("/") == False:
+				#Get the variables
 				completeFileSize += item["Size"]
 				fileSize = size(item["Size"])
-				child = QTreeWidgetItem([ item["Key"] , "Unknown", item["ETag"], f'{fileSize}'])
+				fileName = item["Key"]
+				filePath = os.path.normpath(os.path.join(bucket, item["Key"]))
+				fileType =  GetFileType(fileName).value
+				osFileType = OS_Type.File
+				eTag =  item["ETag"].replace('"', '')
+
+
+				#Create the child item
+				child = QTreeWidgetItem([ fileName , "Unknown", fileSize, eTag])
+
+				#Set the check state.
 				child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
 				child.setCheckState(0, Qt.Unchecked)
+
+				#Create Jobname
+				jobName = calculate_job_name(fileName, eTag)
+
+				#If job exists \ is completed, then show it!
+				if jobName in jobListNames:
+					child.setIcon(0, self.fileIcon_JobAvailable)
+					child.setText(1, "Job Available!")
+				else:
+					child.setIcon(0, self.fileIcon_Standard)
+
+				#Set all the data! Updated the function to accept Kwargs instead of needing all items.
+				child = SetItemData(child, FILENAME = fileName, 
+						FILESIZE = fileSize, 
+						FILEPATH = filePath, 
+						FILETYPE = fileType,
+						OSFILETYPE = osFileType,
+						CHECKSUM = eTag,
+						JOBNAME = jobName,
+						BUCKET = bucket)
+
+
+				child.setToolTip(0, f'Etag: {eTag}\n\nJob Name: {jobName}')
+				child.setToolTip(2, f'Filesize: {fileSize}')
+
 				currentItems.append(child)
 		return currentItems, size(completeFileSize)
-
-
-
-##################################################################################################
-## Depricated, and will be removed when ready
-##################################################################################################
-class GetContentsThread(QThread):
-
-	ContentReponse = pyqtSignal(list)
-
-	def __init__(self, bucketName):
-		QThread.__init__(self)
-		self.bucket = bucketName
-
-	def run(self):
-		s3 = boto3.client('s3')
-		objects = s3.list_objects(Bucket=str(self.bucket))
-		if 'Contents' in objects.keys():
-			key = objects['Contents']
-			self.ContentReponse.emit(key)
-		else:
-			key = ["None"]
-			self.ContentReponse.emit(key)
 
 
 ##################################################################################################
@@ -332,14 +389,14 @@ class TranscribeAndDownload(QThread):
 	itemToEmit = pyqtSignal(object, int, str) #TODO - Create a second finishing emitter!!
 
 
-	def __init__(self, files, awsSettings, outputFolder):
+	def __init__(self, files, awsSettings):
 		QThread.__init__(self)
 		self.files = files
-		self.outputFolder = outputFolder
+		self.outputFolder = awsSettings.downloadArea_SRT
 
-		self.accessKey = awsSettings["ACCESS_KEY"]
-		self.secretKey = awsSettings["SECRET_KEY"]
-		self.region = awsSettings["REGION"]
+		self.accessKey = awsSettings.accessKey
+		self.secretKey = awsSettings.secretKey
+		self.region = awsSettings.region
 
 	def run(self):
 
@@ -353,7 +410,7 @@ class TranscribeAndDownload(QThread):
 
 		tasks = []
 		for file in self.files:
-			task = asyncio.ensure_future(self.transcribeJobCreator(file["bucket"], file["name"], self.outputFolder, file["item"]))
+			task = asyncio.ensure_future(self.transcribeJobCreator(file["bucket"], file["name"], file["jobname"], self.outputFolder, file["item"]))
 			task = self.add_success_callback(task, self.transcribeJobCallback)
 			tasks.append(task)
 
@@ -362,8 +419,8 @@ class TranscribeAndDownload(QThread):
 
 	
 	## This creates a callback loop. Otherwise, the function won't register as finished with the "run_until_complete" loop.
-	async def add_success_callback(self, fut, callback):
-		result = await fut
+	async def add_success_callback(self, future, callback):
+		result = await future
 		await callback(result)
 		return result
 
@@ -378,9 +435,9 @@ class TranscribeAndDownload(QThread):
 		#self.itemToEmit.emit(item, 1,  message, res)
 
 
-	async def transcribeJobCreator(self, inBucket, inMediaFile, outputFolder, item):
+	async def transcribeJobCreator(self, inBucket, inMediaFile, inJobName, outputFolder, item):
 		try:
-			transciptionJob = awsModules.Transcribe(self.accessKey, self.secretKey, self.region, inBucket, inMediaFile)
+			transciptionJob = awsModules.Transcribe(self.accessKey, self.secretKey, self.region, inBucket, inMediaFile, inJobName)
 			response = transciptionJob.createJob() #TODO - Make a proper job name!!
 
 			self.itemToEmit.emit(item, 1,  f"Working: {response['TranscriptionJob']['TranscriptionJobName']}")
@@ -402,3 +459,142 @@ class TranscribeAndDownload(QThread):
 			return { "Result" : True, "FileOutput" : inMediaFile, "Item" : item , "Message" : "Subtitle downloaded!" }
 		except:
 			return { "Result" : False, "FileOutput" : "", "Item" : item , "Message" : "Error #001" }
+
+
+class UploadToBucketTEST(QThread):
+
+	allFilesUploaded = pyqtSignal(bool)
+	currentProgress = pyqtSignal(object, int)
+	fileFinished = pyqtSignal(object)
+	logMessage = pyqtSignal(str)
+
+	def __init__(self, items, settings, bucket):
+		QThread.__init__(self)
+		self.items = items;
+		self.settings = settings
+		self.bucket = bucket
+
+
+	def run(self):
+
+		## Create a new loop!
+		try:
+			loop = asyncio.get_event_loop()
+		except:
+			loop = asyncio.new_event_loop()
+			asyncio.set_event_loop(loop)
+
+		## Emit a progress of zero so that the UI functions take over!
+		for item in self.items:
+			self.currentProgress.emit(item, 0)
+
+		#Run the main loop!
+		try:
+			loop.run_until_complete(self.mainLoop())
+		except:
+			self.logMessage.emit("Error #001 - Main loop thread died before completion!!")
+		finally:
+			loop.run_until_complete(loop.shutdown_asyncgens())
+			loop.close()
+			self.allFilesUploaded.emit(True)
+
+
+	async def mainLoop(self):
+		no_concurrent = int(self.settings.uploadAsyncAmount)
+		dltasks = set()
+		for item in self.items:
+			if len(dltasks) >= no_concurrent:
+				# Wait for some download to finish before adding a new one
+				_done, dltasks = await asyncio.wait(dltasks, return_when=asyncio.FIRST_COMPLETED)
+
+			task = asyncio.ensure_future(self.uploadFile(item))
+			task = self.add_success_callback(task, self.uploadFileComplete)
+
+			dltasks.add(asyncio.create_task(task))
+		# Wait for the remaining downloads to finish
+		await asyncio.wait(dltasks)
+
+
+	## This creates a callback loop. Otherwise, the function won't register as finished with the "run_until_complete" loop.
+	async def add_success_callback(self, future, callback):
+		result = await future
+		await callback(result)
+		return result
+
+	async def uploadFileComplete(self, result):
+		message = result["Message"]
+		item = result["Item"]
+		res = result["Result"]
+		if res == True:
+			self.fileFinished.emit(item)
+		else:
+			pass
+
+		
+
+	async def uploadFile(self, item):
+		def uploadCallback(byteAmount):
+			self.amountDone += byteAmount
+			percentage = (self.amountDone / self.fileSize) * 100
+			self.currentProgress.emit(item, percentage)
+
+		s3_client = boto3.client("s3", region_name=self.settings.region)
+
+		self.fileSize = float(os.path.getsize(GetItemData(item, DT.FilePath)))
+		self.amountDone = 0
+
+		try:
+			with open(GetItemData(item, DT.FilePath), "rb") as f:
+				response = s3_client.upload_fileobj(f, str(self.bucket), str(GetItemData(item, DT.FileName)), Callback=uploadCallback)
+		except ClientError as e:
+			return { "Message": "Job Failed!", "Item": item, "Result": False }
+		finally:
+			return { "Message": "Job Finished!", "Item": item, "Result": True}
+
+
+
+
+
+class CreateChecksum(QThread):
+
+	allChecksumsFinished = pyqtSignal(bool)
+	fileChecksum = pyqtSignal(object, str)
+
+	def __init__(self, items):
+		QThread.__init__(self)
+		self.items = items;
+
+	def run(self):
+
+		try:
+			loop = asyncio.get_event_loop()
+		except:
+			loop = asyncio.new_event_loop()
+			asyncio.set_event_loop(loop)
+
+		tasks = []
+		for item in self.items:
+			task = asyncio.ensure_future(self.CheckSumCreation(item))
+			task = self.add_success_callback(task, self.CheckSumCreated)
+			tasks.append(task)
+
+		finished, unfinished = loop.run_until_complete(asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED))
+		loop.close()
+
+
+	## This creates a callback loop. Otherwise, the function won't register as finished with the "run_until_complete" loop.
+	async def add_success_callback(self, future, callback):
+		result = await future
+		await callback(result)
+		return result
+
+	async def CheckSumCreated(self, result):
+		self.allChecksumsFinished.emit(True)
+
+	async def CheckSumCreation(self, item):
+		filePath = item.data(0, Qt.UserRole)
+		checkSum = calculate_s3_etag(filePath)
+		self.fileChecksum.emit(item, checkSum)
+		return { "Checksum": checkSum, "Item": item }
+
+

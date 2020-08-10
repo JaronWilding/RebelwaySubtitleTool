@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="TreeIcons">
+    <file alias="branch-closed">images/branch-closed.png</file>
+    <file alias="branch-end">images/branch-end.png</file>
+    <file alias="branch-more">images/branch-more.png</file>
+    <file alias="branch-open">images/branch-open.png</file>
+    <file alias="vline">images/vline.png</file>
+  </qresource>
+</RCC>

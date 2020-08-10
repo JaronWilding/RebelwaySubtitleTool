@@ -1,8 +1,13 @@
 {
-	"AWSSettings": 
-	{
-		"ACCESS_KEY": "AKIAI5WL4TZF6QB6JPLA", 
-		"SECRET_KEY": "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", 
-		"REGION": "us-east-2"
-	}
+    "AWSSettings": {
+        "ACCESS_KEY": "AKIAI5WL4TZF6QB6JPLA",
+        "SECRET_KEY": "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",
+        "REGION": "us-east-2",
+        "DOWNLOADAREA_SRT": "",
+        "DOWNLOADAREA_JSON": "",
+        "DOWNLOADAREA_TEMPSRT": "C:\\Users\\Jaron\\Documents\\GitHub\\RebelwaySubtitleTool\\RebelwaySubtitleTool\\modules\\downloads\\rawSRTFiles",
+        "DOWNLOADAREA_TEMPJSON": "C:\\Users\\Jaron\\Documents\\GitHub\\RebelwaySubtitleTool\\RebelwaySubtitleTool\\modules\\downloads\\rawJSONFiles",
+		"UPLOAD_ASYNC": "1",
+        "LOGGING": "True"
+    }
 }
